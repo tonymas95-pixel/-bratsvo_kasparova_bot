@@ -32,8 +32,9 @@ GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
 SPREADSHEET_ID     = os.environ.get("SPREADSHEET_ID")
 TRAINER_ID         = int(os.environ.get("TRAINER_ID", "0"))
 
-TIMEZONE    = pytz.timezone(os.environ.get("TZ", "Europe/Belgrade"))
-TZ_FOR_JOBS = ZoneInfo(os.environ.get("TZ", "Europe/Belgrade"))
+_TZ_RAW     = os.environ.get("TZ", "Europe/Moscow").strip()
+TIMEZONE    = pytz.timezone(_TZ_RAW)
+TZ_FOR_JOBS = ZoneInfo(_TZ_RAW)
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
 
@@ -122,8 +123,8 @@ LEVEL_UP_MESSAGES = {
 }
 
 # ── ССЫЛКИ БОНУСНЫХ КАНАЛОВ ──────────────────────────────────────────────────
-BONUS_RECIPES_URL   = "https://t.me/+PLACEHOLDER_RECIPES"
-BONUS_COMMUNITY_URL = "https://t.me/+PLACEHOLDER_COMMUNITY"
+SUPPLEMENT_SHOP_URL = "https://t.me/Mysterioms_bot?startapp"
+MANAGER_URL         = "https://t.me/kokos_vadimovich"
 
 # ── АНКЕТА ───────────────────────────────────────────────────────────────────
 ANKETA = [
@@ -149,11 +150,11 @@ ANKETA = [
      ["🌱 Новичок (0-3 мес)", "💪 Любитель (3-12 мес)", "🔥 Продвинутый (1-3 года)", "🏆 Спортсмен (3+ лет)"]),
     ("motivation",    "text",   "💫 Что тебя мотивирует тренироваться?", None),
     ("psych",         "choice", "🧠 Что тебя больше всего заряжает в тренировках?",
-     ["🏆 Рекорды — хочу быть лучшей версией себя",
-      "👥 Братство — важно быть частью группы и чувствовать поддержку",
-      "📊 Цифры — вижу прогресс в данных и это заряжает",
-      "💪 Самочувствие — хочу чувствовать себя сильным и энергичным",
-      "🎯 Цель — у меня конкретная задача и я иду к ней"]),
+     ["🏆 Рекорды и рост",
+      "👥 Братство и поддержка",
+      "📊 Цифры и прогресс",
+      "💪 Самочувствие и сила",
+      "🎯 Конкретная цель"]),
     ("extra",         "text",   "📝 Что ещё важно знать о тебе? (если нет — напиши «нет»)", None),
 ]
 ANKETA_KEYS = [q[0] for q in ANKETA]
@@ -417,7 +418,7 @@ BTN_STATS         = "📊 Моя статистика"
 BTN_WORKOUT       = "🏋️‍♂️ Тренировки\n(+20 XP +8 🪙)"
 BTN_FOOD          = "🥗 Питание\n(+10 XP +3 🪙)"
 BTN_RECORDS       = "🏆 Рекорды\n(1 кг = 1 XP)"
-BTN_TOP           = "💪 ТОП 5 БРАТСТВА 💪"
+BTN_TOP           = "💪 ТОП 100 БРАТСТВА 💪"
 BTN_BONUS         = "🎁 Подогрев для СВОИХ"
 BTN_WEIGHIN       = "⚖️ Измерить вес (Вс)\n(+30 XP +20 🪙)"
 BTN_SCHEDULE_NEW  = "📅 Расписание (+50 XP +20 🪙)"
@@ -2918,52 +2919,50 @@ async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, "⚠️ Не удалось загрузить рейтинг.", reply_markup=menu_for(user.id))
         return
     if not ranked:
-        await safe_reply(update, "💪 В братстве пока пусто. Стань первым — закрой тренировку!",
+        await safe_reply(update, "💪 В Братстве пока пусто. Стань первым — закрой тренировку!",
                          reply_markup=menu_for(user.id))
         return
     medals = ["🥇", "🥈", "🥉"]
-    text   = "💪 *ТОП-5 БРАТСТВА* 💪\n\n"
-    for i, u in enumerate(ranked[:5]):
+    top = ranked[:100]
+    text = "💪 *ТОП-100 БРАТСТВА* 💪\n\n"
+    for i, u in enumerate(top):
         medal = medals[i] if i < 3 else f"{i + 1}."
-        text += f"{medal} *{md_safe(u['name'])}*\n    {u['level']} · {u['xp']} XP · {u['workouts']} трен.\n\n"
+        me = " ← ты" if u["id"] == str(user.id) else ""
+        text += f"{medal} *{md_safe(u['name'])}* — {u['level']} · {u['xp']} XP · {u['workouts']} трен.{me}\n"
+    text += "\n"
     my_rank = next((i + 1 for i, u in enumerate(ranked) if u["id"] == str(user.id)), None)
     if my_rank:
         text += f"📊 *Твоё место:* {my_rank}-е из {len(ranked)}\n"
     text += "_Братство смотрит. Нападай на первую строчку. 🔥_"
-    await safe_reply(update, text, reply_markup=menu_for(user.id))
-    if len(ranked) > 5:
-        await update.message.reply_text(
-            "Хочешь увидеть всех?",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("👁 Показать весь рейтинг", callback_data="top_full")
-            ]]))
+    # Разбиваем длинный текст
+    for chunk_start in range(0, len(text), 3800):
+        chunk = text[chunk_start:chunk_start + 3800]
+        rm = menu_for(user.id) if chunk_start + 3800 >= len(text) else None
+        await safe_send(context, update.effective_chat.id, chunk, reply_markup=rm)
 
 
 async def leaderboard_full_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обратная совместимость — теперь весь ТОП-100 показывается сразу."""
     query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    try:
-        ranked = await asyncio.to_thread(lambda: _build_ranked(*_read_all_sheets()))
-        medals = ["🥇", "🥈", "🥉"]
-        text   = "💪 *ПОЛНЫЙ РЕЙТИНГ БРАТСТВА* 💪\n\n"
-        for i, u in enumerate(ranked):
-            medal = medals[i] if i < 3 else f"{i + 1}."
-            me    = " ← ты" if u["id"] == str(user.id) else ""
-            text += f"{medal} *{md_safe(u['name'])}* — {u['xp']} XP · {u['workouts']} трен.{me}\n"
-        for chunk in range(0, len(text), 3800):
-            await safe_send(context, query.message.chat_id, text[chunk:chunk + 3800])
-    except Exception as e:
-        logger.error(f"leaderboard_full error: {e}")
-        await query.message.reply_text("⚠️ Не удалось загрузить рейтинг.")
+    await query.answer("Рейтинг уже показан полностью ✅")
 
 
-# ── БОНУСЫ ────────────────────────────────────────────────────────────────────
+# ── БОНУСЫ / ПОДОГРЕВ ────────────────────────────────────────────────────────
 async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     p, _ = await asyncio.to_thread(get_progress, user.id)
     level_name, _, _ = get_level_name(p["xp"])
     xp = p["xp"]
+
+    # Ранги Братства и XP-пороги
+    RANK_LIST = [
+        (0,     "🫡 Протрузианец"),
+        (450,   "⚔️ Адепт"),
+        (1500,  "🏋️ Лифтер"),
+        (4000,  "💎 Титан"),
+        (7500,  "🤖 Киборг"),
+        (12000, "👑 Легенда"),
+    ]
 
     FOOTER = (
         "\n━━━━━━━━━━━━━\n"
@@ -2971,88 +2970,51 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Что скрыто за следующими — узнаешь когда дойдёшь. 🔥"
     )
 
-    if xp < 450:
-        xp_left = 450 - xp
-        text = (
-            f"🎁 *ПОДОГРЕВ ДЛЯ СВОИХ*\n\n"
-            f"🔒 Раздел открывается с ранга *Адепт* (450 XP)\n"
-            f"Осталось: *{xp_left} XP*\n\n"
-            f"━━━━━━━━━━━━━\n"
-            f"*Путь в братстве:*\n\n"
-            f"🔒 ⚔️ Адепт — с 450 XP\n"
-            f"↳ 📲 20 рецептов на 50+ г белка\n"
-            f"↳ 💪 Закрытый канал Братства\n"
-            f"🏋️ Лифтер — 🔐 засекречено\n"
-            f"💎 Титан — 🔐 засекречено\n"
-            f"🤖 Киборг — 🔐 засекречено\n"
-            f"👑 Легенда — 🔐 засекречено"
-            f"{FOOTER}\n\n"
-            "_Заполни анкету, цели, расписание — закрывай тренировки.\n"
-            "Ранг Адепта ближе чем кажется._ ⚔️"
-        )
-        await safe_reply(update, text, reply_markup=menu_for(user.id))
-    else:
-        text = (
-            f"🎁 *ПОДОГРЕВ ДЛЯ СВОИХ*\n\n"
-            f"Твой ранг:\n"
-            f"*{level_name}* — доступ открыт 🔓\n"
-            f"━━━━━━━━━━━━━\n"
-            f"*Путь в братстве:*\n\n"
-            f"✅ ⚔️ Адепт — открыт\n"
-            f"↳ 📲 20 рецептов на 50+ г белка\n"
-            f"↳ 💪 Закрытый канал Братства\n"
-        )
+    text = f"🎁 *ПОДОГРЕВ ДЛЯ СВОИХ*\n\n"
+    text += f"Твой ранг: *{level_name}* · {xp} XP\n"
+    text += "━━━━━━━━━━━━━\n"
+    text += "*Путь в Братстве:*\n\n"
 
-        buttons = [
-            [InlineKeyboardButton("📲 20 видео-рецептов",       url=BONUS_RECIPES_URL)],
-            [InlineKeyboardButton("💪 Закрытый канал Братства", url=BONUS_COMMUNITY_URL)],
-        ]
-
-        if xp >= 1500:
-            text += (
-                "✅ 🏋️ Лифтер — открыт\n"
-                "↳ 🪙 Магазин Братства\n"
-                "↳ 🏋️ Онлайн–тренировка\n"
-                "↳ 💭 Консультация\n"
-            )
-            if xp >= 4000:
-                text += "✅ 💎 Титан — открыт\n"
-            else:
-                text += "💎 Титан — 🔐 засекречено\n"
-            if xp >= 7500:
-                text += "✅ 🤖 Киборг — открыт\n"
-            else:
-                text += "🤖 Киборг — 🔐 засекречено\n"
-            if xp >= 12000:
-                text += "✅ 👑 Легенда — открыт"
-            else:
-                text += "👑 Легенда — 🔐 засекречено"
-
-            text += FOOTER
-            text += (
-                "\n\n━━━━━━━━━━━━━\n"
-                "🪙 *МАГАЗИН БРАТСТВА*\n\n"
-                f"У тебя: *{p['coins']} монет* 🎁\n\n"
-                "Трать монеты на реальные бонусы 👇"
-            )
-            buttons.append([InlineKeyboardButton("🏋️ Онлайн-тренировка 1ч — 700 🪙",
-                                                  callback_data="shop_training")])
-            buttons.append([InlineKeyboardButton("💬 Личная консультация 40 мин — 500 🪙",
-                                                  callback_data="shop_consult")])
+    # Динамически строим список рангов
+    for threshold, rank_name in RANK_LIST:
+        if xp >= threshold:
+            text += f"✅ {rank_name} — открыт\n"
         else:
-            text += (
-                "🏋️ Лифтер — 🔐 засекречено\n"
-                "💎 Титан — 🔐 засекречено\n"
-                "🤖 Киборг — 🔐 засекречено\n"
-                "👑 Легенда — 🔐 засекречено"
-            )
-            text += FOOTER
+            text += f"🔐 {rank_name} — с {threshold} XP\n"
 
-        await update.message.reply_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(buttons),
+    text += FOOTER
+
+    # ШОП БАДОВ — доступен ВСЕМ (с Протрузианца)
+    text += (
+        "\n\n━━━━━━━━━━━━━\n"
+        "💊 *ШОП БАДОВ*\n\n"
+        "🔥 *Скидка 10%* на первый заказ от 10 000 ₽\n"
+        "Качественные добавки для результата 👇"
+    )
+
+    buttons = [
+        [InlineKeyboardButton("🛒 Заказать в приложении", url=SUPPLEMENT_SHOP_URL)],
+        [InlineKeyboardButton("📲 Заказать у менеджера",  url=MANAGER_URL)],
+    ]
+
+    # Магазин монет — с ранга Лифтер (1500+ XP)
+    if xp >= 1500:
+        text += (
+            "\n\n━━━━━━━━━━━━━\n"
+            "🪙 *МАГАЗИН БРАТСТВА*\n\n"
+            f"У тебя: *{p['coins']} монет* 🎁\n\n"
+            "Трать монеты на реальные бонусы 👇"
         )
+        buttons.append([InlineKeyboardButton("🏋️ Онлайн-тренировка 1ч — 700 🪙",
+                                              callback_data="shop_training")])
+        buttons.append([InlineKeyboardButton("💬 Личная консультация 40 мин — 500 🪙",
+                                              callback_data="shop_consult")])
+
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 # ── РАСПИСАНИЕ ────────────────────────────────────────────────────────────────
@@ -4309,41 +4271,50 @@ async def records_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user      = update.effective_user
     today     = datetime.now(TIMEZONE).date()
     last_date = await asyncio.to_thread(get_records_last_date, user.id)
+    rec       = await asyncio.to_thread(get_last_records, user.id)
 
+    # Всегда показываем текущие рекорды, если они есть
+    if rec and rec.get("sum") not in (None, "", "0"):
+        rec_text = (
+            "🏆 *ТВОИ СИЛОВЫЕ РЕКОРДЫ*\n\n"
+            f"🏋️ Приседания: *{rec['squat']} кг*\n"
+            f"💪 Жим лёжа: *{rec['bench']} кг*\n"
+            f"🔥 Становая: *{rec['deadlift']} кг*\n"
+            f"🧗 Подтягивания (+вес): *{rec['pullup']} кг*\n"
+            f"➖➖➖\n"
+            f"📊 Сумма: *{rec['sum']} кг*\n"
+            f"⭐ Начислено за рекорды: *+{rec['sum']} XP*\n"
+            f"📅 Обновлено: {rec['date']}\n"
+        )
+    else:
+        rec_text = (
+            "🏆 *СИЛОВЫЕ РЕКОРДЫ*\n\n"
+            "📭 Рекордов ещё нет — заполни и получи XP!\n"
+        )
+
+    # Проверяем, можно ли обновить
     if last_date:
         days_passed = (today - last_date).days
         if days_passed < RECORDS_SEASON_DAYS:
             days_left = RECORDS_SEASON_DAYS - days_passed
-            rec  = await asyncio.to_thread(get_last_records, user.id)
-            text = "🏆 *ТВОИ СИЛОВЫЕ РЕКОРДЫ (1 кг = 1 XP)*\n\n"
-            if rec:
-                text += (f"🏋️ Приседания: *{rec['squat']} кг*\n"
-                         f"💪 Жим лёжа: *{rec['bench']} кг*\n"
-                         f"🔥 Становая: *{rec['deadlift']} кг*\n"
-                         f"🧗 Подтягивания (+вес): *{rec['pullup']} кг*\n"
-                         f"➖➖➖\n"
-                         f"📊 Сумма: *{rec['sum']} кг* → *+{rec['sum']} XP*\n\n")
-            text += (f"📅 Заполнено: {last_date.strftime('%d.%m.%Y')}\n"
-                     f"🔒 Обновить можно через *{days_left} {plural_days(days_left)}*")
-            await safe_reply(update, text, reply_markup=menu_for(user.id))
+            rec_text += f"\n🔒 Обновить можно через *{days_left} {plural_days(days_left)}*"
+            await safe_reply(update, rec_text, reply_markup=menu_for(user.id))
             return
 
-    intro = "🏆 *СИЛОВЫЕ РЕКОРДЫ (1 кг = 1 XP)*\n\n"
-    prev  = get_last_records(user.id)
-    if prev and prev.get("sum") not in (None, "", "0"):
-        intro += (f"📍 *Текущие рекорды:*\n"
-                  f"🏋️ Присед: {prev['squat']} кг · 💪 Жим: {prev['bench']} кг\n"
-                  f"🔥 Становая: {prev['deadlift']} кг · 🧗 Подтяг.: +{prev['pullup']} кг\n"
-                  f"📊 Сумма: *{prev['sum']} кг* — побей их! 🔥\n\n")
-    intro += ("Заполняется *раз в сезон* (3 месяца).\n\n"
-              "📌 Каждый кг = *+1 XP!*\n"
-              "Присед 100 + жим 80 + тяга 120 = *+300 XP* сразу.\n\nПоехали 👇")
+    # Можно обновить — предлагаем заполнить
+    rec_text += (
+        "\n━━━━━━━━━━━━━\n"
+        "📌 Каждый кг = *+1 XP!*\n"
+        "Обновляется раз в сезон (3 месяца).\n\n"
+        "Поехали обновлять 👇"
+    )
+
     records_states[user.id] = {
         "step": 0, "answers": {},
         "first_name": user.first_name or "", "username": uname_of(user),
     }
     save_states()
-    await safe_reply(update, intro, reply_markup=cancel_keyboard())
+    await safe_reply(update, rec_text, reply_markup=cancel_keyboard())
     await ask_records_question(update.effective_chat.id, user.id, context)
 
 
@@ -4768,6 +4739,21 @@ def build_dossier(uid):
     lines = [f"🗂 *ДОСЬЕ — {md_safe(name)}* ({md_safe(uname)})",
              f"🆔 `{uid}`  •  с {reg}", ""]
 
+    # ── XP и Ранг ──
+    try:
+        p, _ = get_progress(int(uid)) if uid.isdigit() else ({}, False)
+        if p:
+            lvl, _, _ = get_level_name(p.get("xp", 0))
+            lines += [
+                f"⭐ *XP:* {p.get('xp', 0)} · *Монеты:* {p.get('coins', 0)} 🪙",
+                f"🏅 *Ранг:* {lvl}",
+                f"🏋️ Тренировок: {p.get('workouts', 0)} · 🥗 Дней питания: {p.get('food_days', 0)}",
+                f"🔥 Стрик: {p.get('streak', 0)} дн.", ""
+            ]
+    except Exception:
+        pass
+
+    # ── Анкета (полные ответы) ──
     try:
         rows = _ws_rows("anketa", _TTL_SHEET)
         row  = next((r for r in rows if r and r[0] == uid), None)
@@ -4775,7 +4761,7 @@ def build_dossier(uid):
                 "weight": "Вес", "target_weight": "Желаемый вес", "health": "Здоровье",
                 "nutrition": "Питание", "sleep": "Сон", "stress": "Стресс",
                 "alcohol": "Алкоголь", "activity": "Активность", "experience": "Опыт",
-                "motivation": "Мотивация", "extra": "Ещё"}
+                "motivation": "Мотивация", "psych": "Психотип", "extra": "Ещё"}
         if row:
             lines.append("📋 *АНКЕТА*")
             for j, key in enumerate(ANKETA_KEYS):
@@ -4788,7 +4774,7 @@ def build_dossier(uid):
     except Exception:
         pass
 
-    # КБЖУ-норма
+    # ── КБЖУ-норма ──
     if uid.isdigit():
         nt = compute_nutrition_targets(int(uid))
         if nt:
@@ -4797,14 +4783,33 @@ def build_dossier(uid):
                       f"• Белок: {nt['protein']} г | Жиры: {nt['fat']} г | Углеводы: {nt['carbs']} г",
                       f"• Режим: {nt['mode']}", ""]
 
-    goals = get_user_goals_summary(int(uid)) if uid.isdigit() else "не заполнены"
-    if goals and goals != "не заполнены":
-        lines.append("🎯 *ЦЕЛИ*")
-        for part in goals.split("; "):
-            if part.strip():
-                lines.append(f"• {md_safe(part)}")
-        lines.append("")
+    # ── Цели (полные ответы) ──
+    try:
+        goals_rows = _ws_rows("goals", _TTL_SHEET)
+        goals_row = next((r for r in goals_rows[1:] if r and r[0] == uid), None)
+        GLBL = ["Главное качество", "Второе качество", "Формат тренировок",
+                "Результат за 3 мес", "Что мешает", "Дедлайн",
+                "Глубинная цель", "Стиль работы"]
+        if goals_row:
+            lines.append("🎯 *ЦЕЛИ (полные ответы)*")
+            vals = goals_row[2:10]
+            for i, lbl in enumerate(GLBL):
+                val = vals[i] if i < len(vals) else ""
+                if val and val.strip():
+                    lines.append(f"• {lbl}: {md_safe(val)}")
+            lines.append("")
+        else:
+            lines += ["🎯 *ЦЕЛИ*", "_не заполнены_", ""]
+    except Exception:
+        goals = get_user_goals_summary(int(uid)) if uid.isdigit() else "не заполнены"
+        if goals and goals != "не заполнены":
+            lines.append("🎯 *ЦЕЛИ*")
+            for part in goals.split("; "):
+                if part.strip():
+                    lines.append(f"• {md_safe(part)}")
+            lines.append("")
 
+    # ── Расписание ──
     if cl and len(cl) > 6 and any([cl[4], cl[5], cl[6]]):
         lines.append("📅 *РАСПИСАНИЕ*")
         if cl[4]: lines.append(f"• Частота: {md_safe(cl[4])}")
@@ -4812,13 +4817,18 @@ def build_dossier(uid):
         if cl[6]: lines.append(f"• Время/длит.: {md_safe(cl[6])}")
         lines.append("")
 
+    # ── Рекорды + XP от суммы ──
     rec = get_last_records(int(uid)) if uid.isdigit() else None
     if rec:
         lines += ["🏆 *СИЛОВЫЕ РЕКОРДЫ*",
                   f"• Присед: {rec['squat']} кг | Жим: {rec['bench']} кг",
                   f"• Становая: {rec['deadlift']} кг | Подтяг: +{rec['pullup']} кг",
-                  f"• Сумма: {rec['sum']} кг ({rec['date']})", ""]
+                  f"• 📊 Сумма: *{rec['sum']} кг* → *+{rec['sum']} XP*",
+                  f"• Обновлено: {rec['date']}", ""]
+    else:
+        lines += ["🏆 *СИЛОВЫЕ РЕКОРДЫ*", "_не заполнены_", ""]
 
+    # ── Прогрев ──
     wa = get_warmup_answers(uid)
     if wa:
         lines.append("🔥 *ИЗ ПРОГРЕВА*")
@@ -4827,6 +4837,7 @@ def build_dossier(uid):
                 lines.append(f"• {WARMUP_Q_LABELS.get(key, key)}: {md_safe(val)}")
         lines.append("")
 
+    # ── Самочувствие ──
     try:
         wb_rows = _ws_rows("wellbeing", _TTL_SHEET)
         user_wb = [r for r in wb_rows if r and r[0] == uid][-3:]
@@ -4835,6 +4846,21 @@ def build_dossier(uid):
             for r in user_wb:
                 lines.append(f"• {r[1] if len(r) > 1 else '—'}: "
                               f"{md_safe(', '.join(r[2:5])) if len(r) > 2 else '—'}")
+            lines.append("")
+    except Exception:
+        pass
+
+    # ── История веса ──
+    try:
+        wh = get_user_weight_history(int(uid), weeks=8) if uid.isdigit() else []
+        if wh:
+            lines.append("⚖️ *ИСТОРИЯ ВЕСА (посл. 8 замеров)*")
+            for date_str, kg in wh:
+                lines.append(f"• {date_str}: {kg} кг")
+            if len(wh) >= 2:
+                diff = wh[-1][1] - wh[0][1]
+                sign = "+" if diff >= 0 else ""
+                lines.append(f"📉 Изменение: *{sign}{diff:.1f} кг*")
             lines.append("")
     except Exception:
         pass
