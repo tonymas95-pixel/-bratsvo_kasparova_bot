@@ -439,7 +439,6 @@ def main_keyboard(is_trainer=False, anketa_filled=False,
         rows.append([KeyboardButton(BTN_ANKETA)])
     if is_trainer:
         rows.append([KeyboardButton(BTN_CLIENTS), KeyboardButton(BTN_WEEK)])
-        rows.append([KeyboardButton(BTN_UPLOAD_PLAN)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -3538,17 +3537,16 @@ async def workout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "За какой день отчёт?\n"
         "_Вчера не успел — закрой сейчас, стрик сохранится._"
     )
-    # Кнопка "Получить план" — только если план загружен и сегодня тренировочный день
-    plan_btn = []
-    if get_current_cycle() > 0 and get_training_day_number(user.id) is not None:
-        plan_btn = [[InlineKeyboardButton("📋 Получить план", callback_data="get_plan")]]
+    extra_btns = [[InlineKeyboardButton("📋 Получить план", callback_data="get_plan")]]
+    if user.id == TRAINER_ID:
+        extra_btns.append([InlineKeyboardButton("📋 Загрузить план", callback_data="upload_plan")])
 
     await safe_reply(update, summary,
                      reply_markup=InlineKeyboardMarkup(
-                         plan_btn + [
+                         [
                          [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today")],
                          [InlineKeyboardButton("📅 Отчёт за вчера",   callback_data="wk_yesterday")],
-                     ]))
+                     ] + extra_btns))
 
 
 async def workout_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -6890,6 +6888,8 @@ async def _callback_router_impl(update: Update, context: ContextTypes.DEFAULT_TY
         await food_done_callback(update, context)
     elif data == "get_plan":
         await show_plan_to_user(update, context)
+    elif data == "upload_plan":
+        await upload_plan_cmd(update, context)
     elif data in ("wk_today", "wk_yesterday", "wk_today_go", "wk_yesterday_go",
                   "workout_today", "workout_yesterday"):
         # ⚠️ Объекты Telegram в PTB v20+ заморожены — подменять query.data
