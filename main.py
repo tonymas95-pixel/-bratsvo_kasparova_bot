@@ -420,6 +420,7 @@ BTN_CLIENTS       = "👥 Клиенты"
 BTN_WEEK          = "📈 Итоги недели"
 BTN_DASHBOARD     = "📊 Дашборд"
 BTN_UPLOAD_PLAN   = "📋 Загрузить план"
+BTN_GET_PLAN      = "📋 Получить план"
 
 
 def main_keyboard(is_trainer=False, anketa_filled=False,
@@ -3330,42 +3331,43 @@ def get_training_day_number(user_id):
 
 
 async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает пользователю план на текущий тренировочный день."""
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
+    """Показывает пользователю план на текущий тренировочный день.
+    Работает и из callback (inline-кнопка), и из текстовой кнопки меню."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        user = update.callback_query.from_user
+    else:
+        user = update.effective_user
 
     day_num = get_training_day_number(user.id)
     if day_num is None:
         sched = get_schedule_days(user_id=user.id)
         if not sched:
-            await query.message.reply_text(
+            await safe_reply(update,
                 "📅 Сначала заполни расписание — без него я не знаю, "
                 "какой сегодня тренировочный день.\n\n"
-                "👇 Нажми *«📅 Расписание»*",
-                parse_mode="Markdown")
+                "👇 Нажми *«📅 Расписание»*")
             return
         else:
-            await query.message.reply_text(
+            await safe_reply(update,
                 "📅 Сегодня не тренировочный день по твоему расписанию.\n\n"
-                f"Твои дни: *{', '.join(sched)}*",
-                parse_mode="Markdown")
+                f"Твои дни: *{', '.join(sched)}*")
             return
 
     cycle = get_current_cycle()
     if cycle == 0:
-        await query.message.reply_text(
+        await safe_reply(update,
             "📋 Тренер ещё не загрузил план. Скоро будет!")
         return
 
     plan = get_plan_for_day(day_num, cycle)
     if not plan:
-        await query.message.reply_text(
+        await safe_reply(update,
             f"📋 План для дня {day_num} в цикле {cycle} не найден.\n"
             "Возможно, тренер ещё не загрузил этот день.")
         return
 
-    await query.message.reply_text(
+    await safe_reply(update,
         f"📋 *ПЛАН ТРЕНИРОВКИ — День {day_num}*\n"
         f"_Цикл {cycle}_\n"
         f"━━━━━━━━━━━━━\n\n"
@@ -3373,7 +3375,6 @@ async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━\n"
         "💡 _Запиши рабочие веса в каждом подходе и отправь отчёт._\n"
         "👇 *Нажми «📝 Отчёт за сегодня»*",
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today")],
         ]))
@@ -4605,6 +4606,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await goals_cmd(update, context)
     if "Анкета" in text:
         return await anketa_cmd(update, context)
+    if "Получить план" in text:
+        return await show_plan_to_user(update, context)
     if is_trainer and "Загрузить план" in text:
         return await upload_plan_cmd(update, context)
     if is_trainer and "Клиенты" in text:
