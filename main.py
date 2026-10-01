@@ -275,17 +275,25 @@ async def safe_send(context, chat_id, text, reply_markup=None, parse_mode="Markd
 
 
 async def safe_reply(update, text, reply_markup=None, parse_mode="Markdown"):
-    """Ответ с Markdown-fallback и авто-разбивкой длинных сообщений."""
+    """Ответ с Markdown-fallback и авто-разбивкой длинных сообщений.
+
+    Работает и с обычными сообщениями, и с callback-запросами:
+    используем update.effective_message вместо update.message.
+    """
     MAX_LEN = 4000
+    msg = update.effective_message
+    if msg is None:
+        logger.error("safe_reply: no effective_message in update")
+        return None
 
     if len(text) <= MAX_LEN:
         try:
-            return await update.message.reply_text(
+            return await msg.reply_text(
                 text, parse_mode=parse_mode, reply_markup=reply_markup,
             )
         except Exception:
             try:
-                return await update.message.reply_text(text, reply_markup=reply_markup)
+                return await msg.reply_text(text, reply_markup=reply_markup)
             except Exception as e:
                 logger.error(f"safe_reply failed: {e}")
                 return None
@@ -306,12 +314,12 @@ async def safe_reply(update, text, reply_markup=None, parse_mode="Markdown"):
     for i, part in enumerate(parts):
         rm = reply_markup if i == len(parts) - 1 else None
         try:
-            last_msg = await update.message.reply_text(
+            last_msg = await msg.reply_text(
                 part, parse_mode=parse_mode, reply_markup=rm,
             )
         except Exception:
             try:
-                last_msg = await update.message.reply_text(part, reply_markup=rm)
+                last_msg = await msg.reply_text(part, reply_markup=rm)
             except Exception as e:
                 logger.error(f"safe_reply part {i} failed: {e}")
     return last_msg
