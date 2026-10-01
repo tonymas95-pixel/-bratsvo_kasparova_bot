@@ -55,7 +55,7 @@ AI_COOLDOWN_SEC = int(os.environ.get("AI_COOLDOWN_SEC", "15"))
 # ── XP / МОНЕТЫ ──────────────────────────────────────────────────────────────
 XP_PER_WORKOUT    = 20
 XP_PER_FOOD_DAY   = 10
-XP_PER_WELLBEING  = 10
+# XP_PER_WELLBEING убрано — самочувствие не используется
 XP_SCHEDULE_BONUS = 50
 XP_GOALS_BONUS    = 100
 XP_ANKETA_BONUS   = 150
@@ -215,15 +215,7 @@ GOALS_TEST = [
                  "📋 Дай план — сам сделаю", "🌀 По ситуации — гибко"]},
 ]
 
-# ── САМОЧУВСТВИЕ ─────────────────────────────────────────────────────────────
-WELLBEING_SURVEY = [
-    {"q": "😴 Как ты выспался сегодня?",
-     "options": ["💤 Отлично", "🙂 Нормально", "🥱 Так себе", "😩 Не выспался"]},
-    {"q": "⚡ Уровень энергии перед тренировкой?",
-     "options": ["🔋 Полный заряд", "😌 Норм", "🪫 Низковато", "😮‍💨 На нуле"]},
-    {"q": "💪 Мышцы после прошлой тренировки?",
-     "options": ["✅ Восстановились", "😐 Лёгкая крепатура", "😣 Сильно болят"]},
-]
+# Самочувствие (wellbeing) удалено — не используется в этом боте
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -362,19 +354,16 @@ schedule_states: dict[int, dict]   = {}
 records_states: dict[int, dict]    = {}
 weighin_states: dict[int, dict]    = {}
 _processing: set[int]             = set()  # защита от двойного нажатия
-wellbeing_states: dict[int, dict]  = {}
 cycle_states: dict[int, dict]      = {}
-# Локальная отметка «опрос самочувствия сдан сегодня»: {user_id: "17.08.2026"}
-# Нужна, чтобы гейт перед отчётом о тренировке НЕ зависел от доступности
-# Google Sheets и от задержки кэша.
-wellbeing_done_marks: dict[int, str] = {}
+plan_upload_states: dict[int, dict] = {}   # админ: пошаговая загрузка плана
 
 _STATE_DICTS = {
     "user_states": user_states, "anketa_states": anketa_states,
     "food_states": food_states, "goals_test_states": goals_test_states,
     "schedule_states": schedule_states, "records_states": records_states,
-    "weighin_states": weighin_states, "wellbeing_states": wellbeing_states,
-    "cycle_states": cycle_states, "wellbeing_done_marks": wellbeing_done_marks,
+    "weighin_states": weighin_states,
+    "cycle_states": cycle_states,
+    "plan_upload_states": plan_upload_states,
 }
 
 
@@ -421,15 +410,16 @@ BTN_RECORDS       = "🏆 Рекорды\n(1 кг = 1 XP)"
 BTN_TOP           = "💪 ТОП 100 БРАТСТВА 💪"
 BTN_BONUS         = "🎁 Подогрев для СВОИХ"
 BTN_WEIGHIN       = "⚖️ Измерить вес (Вс)\n(+30 XP +20 🪙)"
-BTN_SCHEDULE_NEW  = "📅 Расписание (+50 XP +20 🪙)"
+BTN_SCHEDULE_NEW  = "📅 Расписание\n(+50 XP +20 🪙)"
 BTN_SCHEDULE_DONE = "📅 Расписание"
-BTN_GOALS_NEW     = "🎯 Цели (+100 XP +30 🪙)"
+BTN_GOALS_NEW     = "🎯 Цели\n(+100 XP +30 🪙)"
 BTN_GOALS_DONE    = "🎯 Цели"
 BTN_ANKETA        = "📋 Анкета (+150 XP +100 🪙)"
 BTN_CANCEL        = "❌ Отмена"
 BTN_CLIENTS       = "👥 Клиенты"
 BTN_WEEK          = "📈 Итоги недели"
 BTN_DASHBOARD     = "📊 Дашборд"
+BTN_UPLOAD_PLAN   = "📋 Загрузить план"
 
 
 def main_keyboard(is_trainer=False, anketa_filled=False,
@@ -448,6 +438,7 @@ def main_keyboard(is_trainer=False, anketa_filled=False,
         rows.append([KeyboardButton(BTN_ANKETA)])
     if is_trainer:
         rows.append([KeyboardButton(BTN_CLIENTS), KeyboardButton(BTN_WEEK)])
+        rows.append([KeyboardButton(BTN_UPLOAD_PLAN)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -501,7 +492,6 @@ _TTL_MAP = {
     "sheet_progress":   70,
     "sheet_workouts":   40,
     "sheet_food_log":   40,
-    "sheet_wellbeing":  40,
     "sheet_records":    150,
     "sheet_weight_log": 150,
     "sheet_goals":      200,
@@ -739,7 +729,7 @@ SHEET_HEADERS = {
     "anketa":     ["ID", "Дата"] + ANKETA_KEYS,
     "plan_bonus": ["ID", "Неделя"],
     "records":    ["ID", "Дата", "Присед", "Жим", "Становая", "Подтяг", "Сумма"],
-    "wellbeing":  ["ID", "Дата", "Сон", "Энергия", "Мышцы"],
+    "training_plans": ["Цикл", "День", "План"],
 }
 
 
@@ -2289,18 +2279,6 @@ def _collect_weekly_data(user_id, week_start=None, week_end=None):
     # Стрик и XP
     p, _ = get_progress(user_id)
 
-    # Самочувствие — тоже строго за период
-    wellbeing_note = ""
-    trend = _get_wellbeing_range(user_id, week_start, week_end)
-    if trend:
-        bad = sum(1 for r in trend if _wellbeing_score(r) < 3)
-        if bad >= 3:
-            wellbeing_note = f"⚠️ {bad} из {len(trend)} дней — плохое восстановление"
-        elif bad > 0:
-            wellbeing_note = f"Восстановление: {len(trend)-bad}/{len(trend)} дней в норме"
-        else:
-            wellbeing_note = "Восстановление стабильное"
-
     return {
         "period_start":     week_start,
         "period_end":       week_end,
@@ -2319,7 +2297,6 @@ def _collect_weekly_data(user_id, week_start=None, week_end=None):
         "streak":           p.get("streak", 0),
         "food_streak":      p.get("food_streak", 0),
         "xp":               p.get("xp", 0),
-        "wellbeing_note":   wellbeing_note,
         "week_strength":    "\n".join(week_strength[-5:]) if week_strength else "",
         "meals_summary":    "\n".join(
             f"- {r[2]}: " + (r[4][:120] if len(r) > 4 and r[4]
@@ -2360,10 +2337,6 @@ def _render_weekly_report(user_name, data):
         if data.get("week_strength"):
             strength_block = f"СИЛОВЫЕ ЛОГИ ЗА НЕДЕЛЮ:\n{data['week_strength']}\n\n"
 
-        wellbeing_line = ""
-        if data.get("wellbeing_note"):
-            wellbeing_line = f"ВОССТАНОВЛЕНИЕ: {data['wellbeing_note']}\n"
-
         streak_line = ""
         if data.get("streak", 0) > 0:
             streak_line = f"СТРИК ТРЕНИРОВОК: {data['streak']} {plural_days(data['streak'])}\n"
@@ -2393,7 +2366,6 @@ def _render_weekly_report(user_name, data):
             f"ТРЕНИРОВКИ (факт/план): {plan_line}\n"
             f"ДНЕЙ ПИТАНИЯ: {data['food_days_week']}\n"
             f"{streak_line}"
-            f"{wellbeing_line}"
             f"\n{strength_block}"
             f"ПИТАНИЕ:\n{data['meals_summary']}\n\n"
             "Формат:\n"
@@ -2972,8 +2944,7 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = f"🎁 *ПОДОГРЕВ ДЛЯ СВОИХ*\n\n"
     text += f"Твой ранг: *{level_name}* · {xp} XP\n"
-    text += "━━━━━━━━━━━━━\n"
-    text += "*Путь в Братстве:*\n\n"
+    text += "━━━━━━━━━━━━━\n\n"
 
     # Динамически строим список рангов
     for threshold, rank_name in RANK_LIST:
@@ -2988,7 +2959,7 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += (
         "\n\n━━━━━━━━━━━━━\n"
         "💊 *ШОП БАДОВ*\n\n"
-        "🔥 *Скидка 10%* на первый заказ от 10 000 ₽\n"
+        "🔥 Скидка 10% *на первый заказ от 10 000 ₽*\n"
         "Качественные добавки для результата 👇"
     )
 
@@ -3312,6 +3283,202 @@ async def finish_anketa(chat_id, user_id, context):
     save_states()
 
 
+# ── ТРЕНИРОВОЧНЫЙ ПЛАН ────────────────────────────────────────────────────────
+
+def get_current_cycle():
+    """Возвращает текущий номер цикла (макс по листу training_plans)."""
+    try:
+        rows = _ws_rows("training_plans", _TTL_SHEET)
+        if not rows:
+            return 0
+        cycles = [int(r[0]) for r in rows if r and r[0] and str(r[0]).isdigit()]
+        return max(cycles) if cycles else 0
+    except Exception:
+        return 0
+
+
+def get_plan_for_day(day_num: int, cycle: int = None):
+    """Возвращает текст плана для указанного дня тренировки в цикле."""
+    try:
+        if cycle is None:
+            cycle = get_current_cycle()
+        rows = _ws_rows("training_plans", _TTL_SHEET)
+        for r in rows:
+            if (r and len(r) >= 3
+                    and str(r[0]).strip() == str(cycle)
+                    and str(r[1]).strip() == str(day_num)):
+                return r[2]
+    except Exception as e:
+        logger.error(f"get_plan_for_day error: {e}")
+    return None
+
+
+def get_training_day_number(user_id):
+    """Определяет, какой сегодня тренировочный день (1, 2, 3) по расписанию.
+
+    Считаем тренировочные дни в неделе по расписанию.
+    Пн=0, Вт=1 ... Вс=6. Находим, какой по счёту
+    тренировочный день сегодня в расписании пользователя.
+    """
+    sched = get_schedule_days(user_id)
+    if not sched:
+        return None
+    today_abbr = DAY_ABBR[datetime.now(TIMEZONE).weekday()]
+    if today_abbr not in sched:
+        return None
+    return sched.index(today_abbr) + 1
+
+
+async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает пользователю план на текущий тренировочный день."""
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    day_num = get_training_day_number(user.id)
+    if day_num is None:
+        sched = get_schedule_days(user_id=user.id)
+        if not sched:
+            await query.message.reply_text(
+                "📅 Сначала заполни расписание — без него я не знаю, "
+                "какой сегодня тренировочный день.\n\n"
+                "👇 Нажми *«📅 Расписание»*",
+                parse_mode="Markdown")
+            return
+        else:
+            await query.message.reply_text(
+                "📅 Сегодня не тренировочный день по твоему расписанию.\n\n"
+                f"Твои дни: *{', '.join(sched)}*",
+                parse_mode="Markdown")
+            return
+
+    cycle = get_current_cycle()
+    if cycle == 0:
+        await query.message.reply_text(
+            "📋 Тренер ещё не загрузил план. Скоро будет!")
+        return
+
+    plan = get_plan_for_day(day_num, cycle)
+    if not plan:
+        await query.message.reply_text(
+            f"📋 План для дня {day_num} в цикле {cycle} не найден.\n"
+            "Возможно, тренер ещё не загрузил этот день.")
+        return
+
+    await query.message.reply_text(
+        f"📋 *ПЛАН ТРЕНИРОВКИ — День {day_num}*\n"
+        f"_Цикл {cycle}_\n"
+        f"━━━━━━━━━━━━━\n\n"
+        f"{plan}\n\n"
+        f"━━━━━━━━━━━━━\n"
+        "💡 _Запиши рабочие веса в каждом подходе и отправь отчёт._\n"
+        "👇 *Нажми «📝 Отчёт за сегодня»*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today")],
+        ]))
+
+
+# ── ТРЕНЕР: ЗАГРУЗКА ПЛАНА ───────────────────────────────────────────────────
+
+async def upload_plan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тренер начинает пошаговую загрузку тренировочного плана."""
+    user = update.effective_user
+    if user.id != TRAINER_ID:
+        return
+    cycle = get_current_cycle() + 1
+    plan_upload_states[user.id] = {
+        "cycle": cycle,
+        "day": 1,
+        "plans": {},
+    }
+    save_states()
+    await safe_reply(update,
+        f"📋 *ЗАГРУЗКА ПЛАНА — Цикл {cycle}*\n"
+        f"━━━━━━━━━━━━━\n\n"
+        f"Отправь план для *Дня 1*.\n\n"
+        "_Формат: объём, % от ПМ, RPE, разминка, "
+        "развивающая часть, гипертрофия.\n"
+        "Без конкретных весов — только структура._\n\n"
+        "Чтобы отменить: /cancel",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("❌ Отмена")]],
+            resize_keyboard=True))
+
+
+async def handle_plan_upload_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает текст тренировочного плана от тренера (пошагово)."""
+    user = update.effective_user
+    state = plan_upload_states.get(user.id)
+    if not state:
+        return False
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return False
+
+    if text == "❌ Отмена" or text == "/cancel":
+        del plan_upload_states[user.id]
+        save_states()
+        await safe_reply(update, "❌ Загрузка плана отменена.",
+                         reply_markup=menu_for(user.id))
+        return True
+
+    day = state["day"]
+    state["plans"][day] = text
+
+    if day < 3:
+        state["day"] = day + 1
+        save_states()
+        await safe_reply(update,
+            f"✅ День {day} сохранён!\n\n"
+            f"Теперь отправь план для *Дня {day + 1}*.\n\n"
+            "Чтобы отменить: /cancel",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("❌ Отмена")]],
+                resize_keyboard=True))
+        return True
+
+    # Все 3 дня загружены — сохраняем в Google Sheets
+    cycle = state["cycle"]
+    plans = state["plans"]
+    try:
+        sheet = ws("training_plans")
+        rows_to_add = []
+        for d in (1, 2, 3):
+            rows_to_add.append([str(cycle), str(d), plans.get(d, "")])
+        for row in rows_to_add:
+            _gs_call(sheet.append_row, row)
+        _ws_invalidate("training_plans")
+    except Exception as e:
+        logger.error(f"upload_plan save error: {e}")
+        await safe_reply(update,
+            "⚠️ Ошибка при сохранении плана. Попробуй ещё раз.",
+            reply_markup=menu_for(user.id))
+        del plan_upload_states[user.id]
+        save_states()
+        return True
+
+    del plan_upload_states[user.id]
+    save_states()
+
+    preview = ""
+    for d in (1, 2, 3):
+        p = plans.get(d, "—")
+        short = p[:100] + "..." if len(p) > 100 else p
+        preview += f"\n*День {d}:*\n{md_safe(short)}\n"
+
+    await safe_reply(update,
+        f"✅ *ПЛАН ЗАГРУЖЕН — Цикл {cycle}*\n"
+        f"━━━━━━━━━━━━━\n"
+        f"{preview}\n"
+        f"━━━━━━━━━━━━━\n"
+        "Ученики увидят план в меню тренировок\n"
+        "по кнопке «📋 Получить план».",
+        reply_markup=menu_for(user.id))
+    return True
+
+
 # ── ТРЕНИРОВКИ ────────────────────────────────────────────────────────────────
 def has_workout_on(user_id, d):
     dstr = d.strftime("%d.%m.%Y")
@@ -3370,22 +3537,27 @@ async def workout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "За какой день отчёт?\n"
         "_Вчера не успел — закрой сейчас, стрик сохранится._"
     )
+    # Кнопка "Получить план" — только если план загружен и сегодня тренировочный день
+    plan_btn = []
+    if get_current_cycle() > 0 and get_training_day_number(user.id) is not None:
+        plan_btn = [[InlineKeyboardButton("📋 Получить план", callback_data="get_plan")]]
+
     await safe_reply(update, summary,
-                     reply_markup=InlineKeyboardMarkup([
+                     reply_markup=InlineKeyboardMarkup(
+                         plan_btn + [
                          [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today")],
                          [InlineKeyboardButton("📅 Отчёт за вчера",   callback_data="wk_yesterday")],
                      ]))
 
 
 async def workout_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                               day: str = None, skip_wellbeing: bool = False):
+                               day: str = None):
     """Приём отчёта о тренировке.
 
     day: "today" | "yesterday" — передаётся роутером явно.
          Объекты Telegram в PTB v20+ неизменяемы, поэтому подменять
          query.data НЕЛЬЗЯ — раньше здесь падал AttributeError и кнопка
          просто крутилась вечно.
-    skip_wellbeing: True, если пользователь пришёл сразу после опроса.
     """
     query = update.callback_query
     await query.answer()
@@ -3416,21 +3588,6 @@ async def workout_day_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 return
 
-            # ── Гейт самочувствия ────────────────────────────────────────────
-            # Опрос нужен ТОЛЬКО если он ещё не пройден сегодня.
-            # Раньше условие было перевёрнуто (`not in wellbeing_states`),
-            # из-за чего после опроса он запускался снова и снова.
-            if not skip_wellbeing:
-                if user.id in wellbeing_states:
-                    # Опрос уже идёт — просто продолжаем его
-                    await query.edit_message_text("💚 Сначала закончим про самочувствие 👇")
-                    await ask_wellbeing_question(user.id, user.id, context)
-                    return
-                if not await _wellbeing_done_today(user.id):
-                    await query.edit_message_text("💚 Сначала пара слов о самочувствии 👇")
-                    await start_wellbeing_survey(user.id, user.id, context,
-                                                 user.first_name or "", uname_of(user))
-                    return
         else:
             if await asyncio.to_thread(has_workout_on, user.id, target):
                 await query.edit_message_text(
@@ -3941,7 +4098,6 @@ async def save_weight(user_id, weight_value, context, photo_note="",
     save_states()
 
 
-# ── САМОЧУВСТВИЕ ──────────────────────────────────────────────────────────────
 def get_schedule_days(user_id):
     try:
         row      = _get_client_row(user_id)
@@ -3952,237 +4108,6 @@ def get_schedule_days(user_id):
     except Exception:
         return []
 
-
-def wellbeing_done_today(user_id):
-    try:
-        rows      = _ws_rows("wellbeing", _TTL_SHEET)
-        today_str = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-        for r in rows[1:]:
-            if len(r) > 1 and r[0] == str(user_id) and r[1] == today_str:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-async def _wellbeing_done_today(user_id) -> bool:
-    """Сдан ли опрос сегодня. Сначала — мгновенная локальная отметка,
-    и только потом обращение к таблице (в отдельном потоке)."""
-    today_str = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-    if wellbeing_done_marks.get(user_id) == today_str:
-        return True
-    try:
-        done = await asyncio.to_thread(wellbeing_done_today, user_id)
-    except Exception as e:
-        logger.error(f"_wellbeing_done_today {user_id}: {e}")
-        return False
-    if done:
-        wellbeing_done_marks[user_id] = today_str
-    return done
-
-
-def _mark_wellbeing_done(user_id):
-    wellbeing_done_marks[user_id] = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-    # Чистим устаревшие отметки, чтобы словарь не рос бесконечно
-    today = wellbeing_done_marks[user_id]
-    for uid in [u for u, d in wellbeing_done_marks.items() if d != today]:
-        wellbeing_done_marks.pop(uid, None)
-
-
-async def start_wellbeing_survey(chat_id, user_id, context, first_name="", username=""):
-    wellbeing_states[user_id] = {
-        "step": 0, "answers": [], "first_name": first_name, "username": username,
-    }
-    save_states()
-    await safe_send(context, chat_id,
-                    "💚 *Пара слов о самочувствии перед тренировкой*\n\n"
-                    f"3 коротких вопроса — тренер будет знать о тебе больше, "
-                    f"и ты получишь *+{XP_PER_WELLBEING} XP* 🎁")
-    await ask_wellbeing_question(chat_id, user_id, context)
-
-
-async def ask_wellbeing_question(chat_id, user_id, context):
-    if user_id not in wellbeing_states:
-        return
-    step = wellbeing_states[user_id]["step"]
-    if step >= len(WELLBEING_SURVEY):
-        await finish_wellbeing_survey(chat_id, user_id, context)
-        return
-    q = WELLBEING_SURVEY[step]
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"💚 *Вопрос {step + 1}/{len(WELLBEING_SURVEY)}:*\n\n{q['q']}",
-        parse_mode="Markdown",
-        reply_markup=wide_keyboard(q["options"], f"wbs_{step}"),
-    )
-
-
-async def wellbeing_survey_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user  = query.from_user
-    if user.id not in wellbeing_states:
-        await query.edit_message_text("Опрос не активен.")
-        return
-    parts  = query.data.split("_")
-    step   = int(parts[1]); opt = int(parts[2])
-    answer = WELLBEING_SURVEY[step]["options"][opt]
-    wellbeing_states[user.id]["answers"].append({"q": WELLBEING_SURVEY[step]["q"], "a": answer})
-    wellbeing_states[user.id]["step"] = step + 1
-    await query.edit_message_text(f"✅ {answer}")
-    await ask_wellbeing_question(update.effective_chat.id, user.id, context)
-
-
-def _get_wellbeing_range(user_id, date_from, date_to) -> list:
-    """Записи самочувствия строго за период (для недельного отчёта)."""
-    try:
-        rows = _ws_rows_safe("wellbeing", _TTL_SHEET)
-        out = []
-        for r in rows[1:] if rows else []:
-            if not r or r[0] != str(user_id) or len(r) < 2:
-                continue
-            d = _safe_date(r[1], "%d.%m.%Y")
-            if d and date_from <= d <= date_to:
-                out.append(r)
-        return out
-    except Exception:
-        return []
-
-
-def _get_wellbeing_trend(user_id: int, days: int = 4) -> list:
-    """Возвращает последние N записей самочувствия (сон, энергия, мышцы)
-    как список троек. Самая новая — последней."""
-    try:
-        rows = _ws_rows("wellbeing", _TTL_SHEET)
-        user_rows = [r for r in rows[1:] if r and r[0] == str(user_id)]
-        return user_rows[-days:] if user_rows else []
-    except Exception:
-        return []
-
-
-def _wellbeing_score(row) -> int:
-    """Оцениваем одну запись от 0 (всё плохо) до 6 (всё хорошо).
-    Сон: Отлично=2, Нормально=1, Так себе=0, Не выспался=0
-    Энергия: Полный=2, Норм=1, Низко=0, На нуле=0
-    Мышцы: Восстановились=2, Лёгкая крепатура=1, Сильно болят=0"""
-    score = 0
-    if len(row) > 2:
-        s = row[2].lower()
-        if "отлично" in s or "💤" in s:           score += 2
-        elif "нормально" in s or "🙂" in s:        score += 1
-    if len(row) > 3:
-        e = row[3].lower()
-        if "полный" in e or "🔋" in e:             score += 2
-        elif "норм" in e or "😌" in e:             score += 1
-    if len(row) > 4:
-        m = row[4].lower()
-        if "восстановил" in m or "✅" in m:        score += 2
-        elif "лёгкая" in m or "крепатура" in m:   score += 1
-    return score
-
-
-async def finish_wellbeing_survey(chat_id, user_id, context):
-    state   = wellbeing_states.get(user_id, {})
-    answers = state.get("answers", [])
-
-    # ✅ Отмечаем сдачу СРАЗУ и локально: даже если запись в таблицу не пройдёт,
-    # человек не застрянет в бесконечном опросе перед отчётом о тренировке.
-    _mark_wellbeing_done(user_id)
-    wellbeing_states.pop(user_id, None)
-    save_states()
-
-    saved_ok = True
-    try:
-        row = [str(user_id), datetime.now(TIMEZONE).strftime("%d.%m.%Y")] + \
-              [a["a"] for a in answers]
-
-        def _save_wellbeing():
-            sheet = ws("wellbeing")
-            _gs_call(sheet.append_row, row)
-            _ws_invalidate("wellbeing")
-        await asyncio.to_thread(_save_wellbeing)
-    except Exception as e:
-        saved_ok = False
-        logger.error(f"wellbeing save error {user_id}: {e}")
-
-    await add_xp(user_id, state.get("first_name", ""), state.get("username", ""),
-                 XP_PER_WELLBEING, context=context)
-
-    # ── Анализ тренда восстановления ─────────────────────────────────────────
-    bad_days = 0
-    try:
-        trend_rows = await asyncio.to_thread(_get_wellbeing_trend, user_id, 4)
-        if len(trend_rows) >= 2:
-            # Считаем сколько подряд "плохих" дней (score < 3 из 6)
-            for r in reversed(trend_rows):
-                if _wellbeing_score(r) < 3:
-                    bad_days += 1
-                else:
-                    break
-    except Exception as e:
-        logger.error(f"wellbeing trend {user_id}: {e}")
-
-    if not saved_ok:
-        logger.warning(f"wellbeing {user_id}: ответы не записаны, но поток не прерван")
-
-    # Кнопки ведут на отчёт БЕЗ повторного опроса — суффикс _go
-    workout_buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today_go")],
-        [InlineKeyboardButton("📅 Отчёт за вчера",   callback_data="wk_yesterday_go")],
-    ])
-
-    if bad_days >= 4:
-        # Критический сигнал — 4+ дня подряд плохое восстановление
-        recovery_msg = (
-            "⚠️ *Стоп. Тело просит паузу.*\n\n"
-            f"Уже {bad_days} дня подряд — усталость, недосып, тяжесть в мышцах.\n"
-            "Это не слабость. Это сигнал.\n\n"
-            "💡 *Больше ≠ лучше.* Прогресс происходит во время восстановления, "
-            "а не во время тренировки. Без отдыха тело не растёт — оно ломается.\n\n"
-            "Сегодня:\n"
-            "• Если тренировка — снизь нагрузку на 30-40%\n"
-            "• Приоритет: сон 8ч, еда, вода\n"
-            "• Один полный день отдыха не убьёт прогресс — он его создаст\n\n"
-            "📊 Давай посмотрим на питание — там часто скрыта причина:\n"
-        )
-        await safe_send(context, chat_id, recovery_msg,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🥗 Отчёт по питанию", callback_data="food_done_init")],
-                            [InlineKeyboardButton("🏋️ Всё равно тренировался", callback_data="wk_today_go")],
-                            [InlineKeyboardButton("👇 Продолжить без отчёта", callback_data="food_skip_recovery")],
-                        ]))
-        # Уведомляем тренера
-        display = get_display_name(user_id, state.get("first_name", ""))
-        await _notify_trainer(
-            context, user_id, display,
-            f"⚠️ *Плохое восстановление {bad_days}+ дней подряд*\n\n"
-            "Низкий сон, энергия и/или крепатура несколько дней.\n"
-            "Возможно стоит снизить нагрузку или уточнить как дела."
-        )
-    elif bad_days >= 2:
-        # Предупреждение — 2-3 дня плохого восстановления
-        recovery_msg = (
-            "💛 *Слушай, я смотрю на твоё самочувствие последние дни.*\n\n"
-            "Сон и энергия не на высоте. Мышцы не успевают восстанавливаться.\n\n"
-            "Сегодня на тренировке:\n"
-            "• Следи за ощущениями — если что-то тянет или давит, сбавь\n"
-            "• Лучше сделать меньше, но качественно\n"
-            "• Хороший сон сегодня = хорошая тренировка завтра\n\n"
-            "_Братство идёт далеко — и берёт себя в охапку, когда надо._ 💪"
-        )
-        await safe_send(context, chat_id, recovery_msg)
-        await safe_send(context, chat_id,
-                        f"💚 *Самочувствие записано!*  +{XP_PER_WELLBEING} XP\n\n"
-                        "👇 *Теперь отчёт по тренировке:*",
-                        reply_markup=workout_buttons)
-    else:
-        # Всё ок — сразу предлагаем отчёт по тренировке
-        await safe_send(context, chat_id,
-                        f"💚 *Принято!*  +{XP_PER_WELLBEING} XP\n\n"
-                        "Тренер знает как ты себя чувствуешь — это важно для нагрузки.\n\n"
-                        "👇 *Теперь жми!*\n"
-                        "_Жду твой отчёт по тренировке._",
-                        reply_markup=workout_buttons)
 
 
 # ── ФОТО ─────────────────────────────────────────────────────────────────────
@@ -4199,8 +4124,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.id in food_states and food_states[user.id].get("mode") in ("collecting", "supplement"):
         state = food_states[user.id]
-        if len(state["photos"]) >= 5:
-            await update.message.reply_text("⚠️ Максимум 5 фото. Нажми «Готово».")
+        if len(state["photos"]) >= 7:
+            await update.message.reply_text("⚠️ Максимум 7 фото. Нажми «Готово».")
             return
         photo        = update.message.photo[-1]
         file         = await context.bot.get_file(photo.file_id)
@@ -4377,11 +4302,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Отмена любой активной сессии
     if text == BTN_CANCEL or "Отмена" in text:
         for d in (user_states, anketa_states, food_states, goals_test_states,
-                  schedule_states, records_states, weighin_states, wellbeing_states):
+                  schedule_states, records_states, weighin_states,
+                  plan_upload_states):
             d.pop(user.id, None)
         save_states()
         await safe_reply(update, "Главное меню:", reply_markup=menu_for(user.id))
         return
+
+    # Загрузка плана (тренер)
+    if user.id in plan_upload_states:
+        handled = await handle_plan_upload_text(update, context)
+        if handled:
+            return
 
     # Взвешивание
     if user.id in weighin_states:
@@ -4673,6 +4605,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await goals_cmd(update, context)
     if "Анкета" in text:
         return await anketa_cmd(update, context)
+    if is_trainer and "Загрузить план" in text:
+        return await upload_plan_cmd(update, context)
     if is_trainer and "Клиенты" in text:
         return await clients_cmd(update, context)
     if is_trainer and "Итоги" in text:
@@ -4836,19 +4770,6 @@ def build_dossier(uid):
             if val and str(val).strip():
                 lines.append(f"• {WARMUP_Q_LABELS.get(key, key)}: {md_safe(val)}")
         lines.append("")
-
-    # ── Самочувствие ──
-    try:
-        wb_rows = _ws_rows("wellbeing", _TTL_SHEET)
-        user_wb = [r for r in wb_rows if r and r[0] == uid][-3:]
-        if user_wb:
-            lines.append("💚 *САМОЧУВСТВИЕ (посл. 3)*")
-            for r in user_wb:
-                lines.append(f"• {r[1] if len(r) > 1 else '—'}: "
-                              f"{md_safe(', '.join(r[2:5])) if len(r) > 2 else '—'}")
-            lines.append("")
-    except Exception:
-        pass
 
     # ── История веса ──
     try:
@@ -5180,7 +5101,7 @@ def delete_user_everywhere(uid):
     for sname, col in [
         ("clients", 0), ("progress", 0), ("workouts", 1), ("food_log", 0),
         ("weight_log", 0), ("goals", 0), ("anketa", 0), ("plan_bonus", 0),
-        ("records", 0), ("wellbeing", 0), ("warmup_transfer", 0),
+        ("records", 0), ("warmup_transfer", 0),
         ("warmup_imported", 0), ("warmup_answers", 0),
     ]:
         _delete_rows_for_user(sname, uid, id_col=col)
@@ -5192,7 +5113,7 @@ def delete_user_everywhere(uid):
     if str(uid).isdigit():
         uid_i = int(uid)
         for d in (user_states, anketa_states, food_states, goals_test_states,
-                  schedule_states, records_states, weighin_states, wellbeing_states):
+                  schedule_states, records_states, weighin_states):
             d.pop(uid_i, None)
 
 
@@ -5223,13 +5144,13 @@ async def delete_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         await query.message.reply_text("⏳ Очищаю все таблицы...")
         for sn in ["clients", "progress", "workouts", "food_log", "weight_log",
-                   "goals", "anketa", "plan_bonus", "records", "wellbeing"]:
+                   "goals", "anketa", "plan_bonus", "records"]:
             clear_sheet_keep_headers(sn)
         with _HW_LOCK:
             _HW.clear()
         hw_save(True)
         for d in (user_states, anketa_states, food_states, goals_test_states,
-                  schedule_states, records_states, weighin_states, wellbeing_states):
+                  schedule_states, records_states, weighin_states):
             d.clear()
         _CACHE.clear()
         save_states()
@@ -5288,7 +5209,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await safe_send(context, query.from_user.id, "⏳ Сбрасываю...")
     for sn in ["progress", "workouts", "food_log", "weight_log",
-               "goals", "anketa", "plan_bonus", "records", "wellbeing"]:
+               "goals", "anketa", "plan_bonus", "records"]:
         clear_sheet_keep_headers(sn)
     with _HW_LOCK:
         _HW.clear()
@@ -5308,7 +5229,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"reset clients: {e}")
     for d in (user_states, anketa_states, food_states, goals_test_states,
-              schedule_states, records_states, weighin_states, wellbeing_states):
+              schedule_states, records_states, weighin_states):
         d.clear()
     _CACHE.clear()
     save_states()
@@ -5428,7 +5349,7 @@ async def send_weekly_nutrition_reports(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
-    for sn in ("goals", "weight_log", "anketa", "clients", "wellbeing"):
+    for sn in ("goals", "weight_log", "anketa", "clients"):
         try:
             _ws_rows(sn, _TTL_ADMIN_READ)
         except Exception:
@@ -5631,7 +5552,7 @@ def _dump_backup(tag: str = "auto") -> str:
     """Полный снимок всех листов в JSON на диск. Возвращает путь."""
     snapshot = {}
     for sn in ("clients", "progress", "workouts", "food_log", "weight_log",
-               "goals", "anketa", "records", "wellbeing", "plan_bonus"):
+               "goals", "anketa", "records", "plan_bonus", "training_plans"):
         try:
             snapshot[sn] = _gs_call(ws(sn).get_all_values, tries=2)
         except Exception as e:
@@ -5717,11 +5638,6 @@ async def send_monthly_report(context, user_id: int, client_row):
         wh = get_user_weight_history(user_id, weeks=8)
         weight_line = ", ".join(f"{d}: {kg}кг" for d, kg in wh[-4:]) if wh else "нет данных"
 
-        # Восстановление за месяц
-        wellbeing_trend = _get_wellbeing_trend(user_id, days=30)
-        bad_days = sum(1 for r in wellbeing_trend if _wellbeing_score(r) < 3) if wellbeing_trend else 0
-        wb_note = f"{bad_days} из {len(wellbeing_trend)} дней — плохое восстановление" if wellbeing_trend else "нет данных"
-
         # Прогресс
         p, _ = get_progress(user_id)
         level_name, _, _ = get_level_name(p["xp"])
@@ -5733,7 +5649,6 @@ async def send_monthly_report(context, user_id: int, client_row):
             f"СИЛОВЫЕ ЛОГИ:\n" + ("\n".join(strength_lines) if strength_lines else "нет данных") + "\n\n"
             f"ДНЕЙ ПИТАНИЯ: {food_days}\n"
             f"ДИНАМИКА ВЕСА: {weight_line}\n"
-            f"ВОССТАНОВЛЕНИЕ: {wb_note}\n"
             f"РАНГ: {level_name}, XP: {p['xp']}, монеты: {p['coins']}\n"
             f"СТРИК ТРЕНИРОВОК: {p['streak']}, СТРИК ПИТАНИЯ: {p['food_streak']}\n\n"
             "Формат отчёта:\n"
@@ -6192,40 +6107,28 @@ async def send_evening_push(context: ContextTypes.DEFAULT_TYPE):
 
             # ── СР: восстановление ───────────────────────────────────────
             elif topic == "recovery":
-                bad_days = 0
-                for r in reversed(_get_wellbeing_trend(user_id, days=3)):
-                    if _wellbeing_score(r) < 3:
-                        bad_days += 1
-                    else:
-                        break
-                if bad_days >= 2:
-                    RECOVERY_MSGS = [
-                        ("💛", "{name}, как ты?",
-                         f"_Несколько дней подряд — усталость и недосып. Сегодня главное — выспаться. Тело скажет спасибо._"),
-                        ("😴", "{name}.",
-                         f"_{bad_days} дня — сон и энергия не на высоте. Если сегодня тренировка — снизь нагрузку, не геройствуй._"),
-                        ("🌿", "{name}.",
-                         "_Восстановление — это не слабость. Это часть роста. Хороший сон сегодня = сильная тренировка завтра._"),
-                    ]
-                    emoji, t, s = RECOVERY_MSGS[(user_id + weekday) % len(RECOVERY_MSGS)]
+                RECOVERY_MSGS = [
+                    ("💛", "{name}, как ты?",
+                     "_Восстановление — часть тренировки. Хороший сон сегодня = сильная тренировка завтра._"),
+                    ("😴", "{name}.",
+                     "_Середина недели — проверь, как тело. Если устал — снизь нагрузку, не геройствуй._"),
+                    ("🌿", "{name}.",
+                     "_Восстановление — это не слабость. Это часть роста. Слушай своё тело._ 💪"),
+                ]
+                emoji, t, s = RECOVERY_MSGS[(user_id + weekday) % len(RECOVERY_MSGS)]
+                nt = compute_nutrition_targets(user_id)
+                if nt and not food_done:
+                    msg = (
+                        f"{emoji} *{md_safe(t.format(name=name))}*\n"
+                        f"{s.format(name=name)}\n\n"
+                        f"_Питание — половина прогресса. Норма сегодня: *{nt['kcal']} ккал* · белок *{nt['protein']} г*_\n\n"
+                        f"👇 *«🥗 Питание»*  ·  *+{XP_PER_FOOD_DAY} XP +{COINS_PER_FOOD_DAY}* 🪙"
+                    )
+                else:
                     msg = (
                         f"{emoji} *{md_safe(t.format(name=name))}*\n"
                         f"{s.format(name=name)}"
                     )
-                else:
-                    nt = compute_nutrition_targets(user_id)
-                    if nt and not food_done:
-                        msg = (
-                            f"😴 *{md_safe(name)}, как восстановление?*\n\n"
-                            f"_Питание — половина прогресса. Норма сегодня: *{nt['kcal']} ккал* · белок *{nt['protein']} г*_\n\n"
-                            f"👇 *«🥗 Питание»*"
-                        )
-                    else:
-                        msg = (
-                            f"💚 *{md_safe(name)}, как ощущения?*\n\n"
-                            "_Завтра перед тренировкой ответь на 3 вопроса о самочувствии — займёт 30 секунд._\n"
-                            "_Тренер подберёт нагрузку точнее._ 💪"
-                        )
 
             # ── ЧТ: питание + КБЖУ ──────────────────────────────────────
             elif topic == "food_kbju":
@@ -6696,6 +6599,12 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     load_states()
     hw_load()
+    # Гарантируем заголовки во всех листах (идемпотентно)
+    try:
+        await asyncio.to_thread(ensure_headers)
+        logger.info("ensure_headers OK")
+    except Exception as e:
+        logger.error(f"ensure_headers error: {e}")
     # Первичное наполнение несгораемых марок из таблицы:
     # если файл HW пуст (первый запуск после обновления) — берём текущие значения
     try:
@@ -6976,14 +6885,15 @@ async def _callback_router_impl(update: Update, context: ContextTypes.DEFAULT_TY
         await anketa_callback(update, context)
     elif data.startswith("food_"):
         await food_done_callback(update, context)
+    elif data == "get_plan":
+        await show_plan_to_user(update, context)
     elif data in ("wk_today", "wk_yesterday", "wk_today_go", "wk_yesterday_go",
                   "workout_today", "workout_yesterday"):
         # ⚠️ Объекты Telegram в PTB v20+ заморожены — подменять query.data
         # нельзя (AttributeError, кнопка «крутится» и ничего не происходит).
         # Передаём день и флаг обычными аргументами.
         day  = "yesterday" if "yesterday" in data else "today"
-        skip = data.endswith("_go")      # пришёл сразу после опроса самочувствия
-        await workout_day_callback(update, context, day=day, skip_wellbeing=skip)
+        await workout_day_callback(update, context, day=day)
     elif data == "workout_append":
         await workout_append_callback(update, context)
     elif data.startswith("workout_"):
@@ -6996,8 +6906,6 @@ async def _callback_router_impl(update: Update, context: ContextTypes.DEFAULT_TY
         await reset_callback(update, context)
     elif data.startswith("cyc_"):
         await cycle_survey_callback(update, context)
-    elif data.startswith("wbs_"):
-        await wellbeing_survey_callback(update, context)
     elif data.startswith("admin_"):
         if data == "admin_dashboard_open":
             await update.callback_query.answer()
