@@ -494,7 +494,6 @@ _TTL_ADMIN_READ = 30    # для тренерских запросов — св�
 _TTL_MAP = {
     "prog_":            90,
     "clirow_":          150,
-    "warmup_imp_":      300,
     "sheet_anketa":     200,
     "sheet_clients":    90,
     "sheet_progress":   70,
@@ -740,6 +739,8 @@ SHEET_HEADERS = {
     "training_plans": ["Цикл", "День", "План"],
 }
 
+# Листы warmup удалены — бот полностью независим от WarmupProFit
+
 
 def clear_sheet_keep_headers(name: str):
     try:
@@ -825,11 +826,14 @@ def register_client(user):
 
 
 def is_anketa_filled(user_id):
+    if user_id in _filled_overrides["anketa"]:
+        return True
     row = _get_client_row(user_id)
     return bool(row and len(row) > 7 and row[7] == "да")
 
 
 def mark_anketa_filled(user_id):
+    _filled_overrides["anketa"].add(user_id)
     try:
         sheet = ws("clients")
         ids   = sheet.col_values(1)
@@ -841,6 +845,7 @@ def mark_anketa_filled(user_id):
 
 
 def mark_goals_filled(user_id):
+    _filled_overrides["goals"].add(user_id)
     try:
         sheet = ws("clients")
         ids   = sheet.col_values(1)
@@ -852,11 +857,23 @@ def mark_goals_filled(user_id):
 
 
 def is_goals_filled(user_id):
+    if user_id in _filled_overrides["goals"]:
+        return True
     row = _get_client_row(user_id)
     return bool(row and len(row) > 10 and row[10] == "да")
 
 
+# In-memory overrides — обход задержки Google Sheets API
+_filled_overrides: dict[str, set[int]] = {
+    "schedule": set(),
+    "goals": set(),
+    "anketa": set(),
+}
+_schedule_days_cache: dict[int, str] = {}  # user_id -> "Вт, Чт, Сб"
+
+
 def mark_schedule_filled(user_id):
+    _filled_overrides["schedule"].add(user_id)
     try:
         sheet = ws("clients")
         ids   = sheet.col_values(1)
@@ -868,6 +885,8 @@ def mark_schedule_filled(user_id):
 
 
 def is_schedule_filled(user_id):
+    if user_id in _filled_overrides["schedule"]:
+        return True
     row = _get_client_row(user_id)
     return bool(row and len(row) > 11 and row[11] == "да")
 
@@ -2489,120 +2508,6 @@ def extract_food_summary(analysis_text: str) -> str:
     return " ".join(fallback.split())[:1500]
 
 
-# ── WARMUP ────────────────────────────────────────────────────────────────────
-def get_warmup_transfer(user_id):
-    try:
-        rows = ws("warmup_transfer").get_all_values()
-        if not rows:
-            return None
-        data_rows = rows if (rows[0] and rows[0][0] and rows[0][0].isdigit()) else rows[1:]
-        for r in data_rows:
-            if r and r[0] == str(user_id):
-                answers = {}
-                if len(r) > 3 and r[3]:
-                    try:
-                        answers = json.loads(r[3])
-                    except Exception:
-                        pass
-                return {
-                    "xp":      int(r[1]) if len(r) > 1 and r[1] else 0,
-                    "coins":   int(r[2]) if len(r) > 2 and r[2] else 0,
-                    "answers": answers,
-                }
-    except Exception as e:
-        logger.error(f"get_warmup_transfer error: {e}")
-    return None
-
-
-def warmup_already_imported(user_id) -> bool:
-    try:
-        return str(user_id) in ws("warmup_imported").col_values(1)
-    except Exception:
-        return False
-
-
-def mark_warmup_imported(user_id, xp, coins):
-    try:
-        ids = ws("warmup_imported").col_values(1)
-        if str(user_id) in ids:
-            return
-        ws("warmup_imported").append_row([
-            str(user_id), str(xp), str(coins),
-            datetime.now(TIMEZONE).strftime("%d.%m.%Y %H:%M"),
-        ])
-    except Exception as e:
-        logger.error(f"mark_warmup_imported error: {e}")
-
-
-def save_warmup_answers(user_id, username, answers: dict):
-    if not answers:
-        return
-    try:
-        sheet = ws("warmup_answers")
-        ts    = datetime.now(TIMEZONE).strftime("%d.%m.%Y %H:%M")
-        for key, val in answers.items():
-            sheet.append_row([str(user_id), username, key, str(val), ts])
-    except Exception as e:
-        logger.error(f"save_warmup_answers error: {e}")
-
-
-def _prefill_anketa_from_warmup(user_id, username, answers):
-    try:
-        if not answers:
-            return
-        mapping = {
-            "name": "name", "c_name": "name",
-            "age": "age",   "c_age": "age",
-            "height": "height", "c_height": "height",
-            "weight": "weight", "c_weight": "weight",
-            "target": "target_weight", "c_target": "target_weight",
-            "health": "health", "c_health": "health",
-            "experience": "experience", "c_level": "experience",
-            "motivation": "motivation", "c_why": "motivation",
-        }
-        prefill = {}
-        for src, dst in mapping.items():
-            if answers.get(src) and dst not in prefill:
-                prefill[dst] = str(answers[src])
-        if not prefill:
-            return
-        sheet = ws("anketa")
-        if str(user_id) in sheet.col_values(1):
-            return
-        row = [str(user_id), datetime.now(TIMEZONE).strftime("%d.%m.%Y")] + \
-              [prefill.get(k, "") for k in ANKETA_KEYS]
-        sheet.append_row(row)
-        _ws_invalidate("anketa")
-    except Exception as e:
-        logger.error(f"_prefill_anketa_from_warmup error: {e}")
-
-
-async def import_warmup_progress(update, context, user):
-    if warmup_already_imported(user.id):
-        return None
-    data = get_warmup_transfer(user.id)
-    if not data:
-        return None
-    xp      = data["xp"]
-    coins   = data["coins"]
-    answers = data.get("answers", {})
-    uname   = uname_of(user)
-    name    = get_display_name(user.id, user.first_name)
-    try:
-        await add_xp(user.id, name, uname, xp, coins, context=context)
-    except Exception as e:
-        logger.error(f"import_warmup add_xp error {user.id}: {e}")
-        return None
-    mark_warmup_imported(user.id, xp, coins)
-    save_warmup_answers(user.id, uname, answers)
-    _prefill_anketa_from_warmup(user.id, uname, answers)
-    coins_text = f"🪙 +{coins} монет\n" if coins > 0 else ""
-    await safe_send(context, user.id,
-                    "🔥 *Твой прогресс из прогрева перенесён!*\n\n"
-                    f"⚡ +{xp} XP\n{coins_text}\n"
-                    "Тренер тебя уже знает — ответы из прогрева в базе 💪")
-    return (xp, coins)
-
 
 # ── УМНОЕ ПРИВЕТСТВИЕ ─────────────────────────────────────────────────────────
 DAY_ABBR = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
@@ -2654,7 +2559,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
         await asyncio.to_thread(register_client, user)
-        await import_warmup_progress(update, context, user)
     except Exception as e:
         logger.error(f"start_cmd init error {user.id}: {e}")
 
@@ -3081,6 +2985,10 @@ async def finish_schedule(chat_id, user_id, context):
             _invalidate_client_row(user_id)
     except Exception as e:
         logger.error(f"finish_schedule write error: {e}")
+    # Кэшируем дни расписания в память — обход задержки Google Sheets
+    days_str = answers.get("q1", "")
+    if days_str:
+        _schedule_days_cache[user_id] = days_str
     xp_line = ""
     if award:
         await add_xp(user_id, state.get("first_name", ""), state.get("username", ""),
@@ -4146,8 +4054,11 @@ async def save_weight(user_id, weight_value, context, photo_note="",
 
 def get_schedule_days(user_id):
     try:
-        row      = _get_client_row(user_id)
-        days_str = row[5] if row and len(row) > 5 else ""
+        # Сначала проверяем in-memory кэш (обход задержки Google Sheets)
+        days_str = _schedule_days_cache.get(user_id, "")
+        if not days_str:
+            row      = _get_client_row(user_id)
+            days_str = row[5] if row and len(row) > 5 else ""
         if not days_str or "Гибк" in days_str:
             return []
         return [abbr for abbr in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] if abbr in days_str]
@@ -4672,45 +4583,6 @@ def planned_workouts_per_week(client_row):
         return 0
 
 
-WARMUP_Q_LABELS = {
-    "train_0": "Что останавливает от тренировок", "train_1": "Сейчас с тренировками",
-    "train_2": "Ради чего тренируется", "food_0": "Сейчас с едой",
-    "food_1": "Где срывается в питании", "food_2": "Опыт с диетами",
-    "name": "Имя", "age": "Возраст", "weight": "Вес", "height": "Рост",
-    "target": "Цель по весу", "goal": "Главная цель",
-    "health": "Здоровье / ограничения", "experience": "Опыт тренировок",
-    "motivation": "Мотивация",
-}
-
-
-def get_warmup_answers(uid):
-    out = []; seen = set()
-    for sname in ["warmup_answers", "consultation_requests"]:
-        try:
-            rows = ws(sname).get_all_values()
-            if not rows:
-                continue
-            data_rows = rows if (rows[0] and rows[0][0] and rows[0][0].isdigit()) else rows[1:]
-            for r in data_rows:
-                if not r or r[0] != str(uid):
-                    continue
-                if sname == "warmup_answers":
-                    key = r[2] if len(r) > 2 else ""
-                    val = r[3] if len(r) > 3 else ""
-                    if val and key and key not in seen:
-                        out.append((key, val)); seen.add(key)
-                else:
-                    if len(r) > 5 and r[5]:
-                        try:
-                            for key, val in json.loads(r[5]).items():
-                                if val and key and key not in seen:
-                                    out.append((key, str(val))); seen.add(key)
-                        except Exception:
-                            pass
-                    break
-        except Exception as e:
-            logger.error(f"get_warmup_answers {sname}: {e}")
-    return out
 
 
 def build_dossier(uid):
@@ -4810,14 +4682,6 @@ def build_dossier(uid):
     else:
         lines += ["🏆 *СИЛОВЫЕ РЕКОРДЫ*", "_не заполнены_", ""]
 
-    # ── Прогрев ──
-    wa = get_warmup_answers(uid)
-    if wa:
-        lines.append("🔥 *ИЗ ПРОГРЕВА*")
-        for key, val in wa:
-            if val and str(val).strip():
-                lines.append(f"• {WARMUP_Q_LABELS.get(key, key)}: {md_safe(val)}")
-        lines.append("")
 
     # ── История веса ──
     try:
@@ -5149,8 +5013,7 @@ def delete_user_everywhere(uid):
     for sname, col in [
         ("clients", 0), ("progress", 0), ("workouts", 1), ("food_log", 0),
         ("weight_log", 0), ("goals", 0), ("anketa", 0), ("plan_bonus", 0),
-        ("records", 0), ("warmup_transfer", 0),
-        ("warmup_imported", 0), ("warmup_answers", 0),
+        ("records", 0),
     ]:
         _delete_rows_for_user(sname, uid, id_col=col)
     _c_del_user(uid)
@@ -6345,65 +6208,6 @@ async def send_weighin_reminders(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Weigh-in reminder error {c[0]}: {e}")
 
 
-async def force_import_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/force_import <user_id> — ручной перенос прогресса из прогрева. Только тренер."""
-    if update.effective_user.id != TRAINER_ID:
-        return
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(
-            "Использование: `/force_import <user_id>`",
-            parse_mode="Markdown",
-        )
-        return
-    target_id = int(args[0])
-    data      = get_warmup_transfer(target_id)
-    if not data:
-        await update.message.reply_text(f"❌ Нет данных в warmup_transfer для `{target_id}`.",
-                                        parse_mode="Markdown")
-        return
-    xp             = data["xp"]
-    coins_credited = data["coins"]
-    answers        = data.get("answers", {})
-    already        = warmup_already_imported(target_id)
-    p_before, _    = get_progress(target_id)
-    await update.message.reply_text(
-        f"📋 *warmup_transfer для {target_id}:*\n"
-        f"XP: {xp} · Монеты: {coins_credited} · Ответов: {len(answers)}\n"
-        f"Сейчас: XP={p_before['xp']}, монеты={p_before['coins']}\n"
-        f"Импортирован: {'✅' if already else '❌'}\n\nНачисляю...",
-        parse_mode="Markdown",
-    )
-    try:
-        cl       = next((c for c in get_all_clients() if c and c[0] == str(target_id)), None)
-        name     = display_name_for(cl) if cl else str(target_id)
-        username = cl[2] if cl and len(cl) > 2 else str(target_id)
-        await add_xp(target_id, name, username, xp, coins_credited, context=context)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка add_xp: {e}")
-        return
-    if not already:
-        mark_warmup_imported(target_id, xp, coins_credited)
-    cl = next((c for c in get_all_clients() if c and c[0] == str(target_id)), None)
-    username = cl[2] if cl and len(cl) > 2 else str(target_id)
-    save_warmup_answers(target_id, username, answers)
-    _prefill_anketa_from_warmup(target_id, username, answers)
-    p_after, _ = get_progress(target_id)
-    await update.message.reply_text(
-        f"✅ *Готово для {target_id}*\n\n"
-        f"XP: {p_before['xp']} → {p_after['xp']} (+{xp})\n"
-        f"Монеты: {p_before['coins']} → {p_after['coins']} (+{coins_credited})",
-        parse_mode="Markdown",
-    )
-    try:
-        await context.bot.send_message(
-            chat_id=target_id,
-            text=f"🔥 *Прогресс из прогрева перенесён!*\n\n⚡ +{xp} XP · 🪙 +{coins_credited}\n\nЖми /start 💪",
-            parse_mode="Markdown",
-        )
-    except Exception:
-        pass
-
 
 async def send_trainer_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     """Пн 07:30 — автоматический отчёт тренеру с аналитикой и рисками."""
@@ -6663,7 +6467,7 @@ async def post_init(app: Application):
         hw_save(True)
         logger.info("HW-марки синхронизированы с таблицей")
     except Exception as e:
-        logger.error(f"HW warmup error: {e}")
+        logger.error(f"HW marks sync error: {e}")
     await app.bot.set_my_commands([
         BotCommand("start",    "🚀 Старт / главное меню"),
         BotCommand("stats",    "📊 Моя статистика"),
@@ -6984,7 +6788,6 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("force_import", force_import_cmd))
     app.add_handler(CommandHandler("dashboard",    admin_dashboard))
     app.add_handler(CommandHandler("start",    start_cmd))
     app.add_handler(CommandHandler("stats",    stats_cmd))
