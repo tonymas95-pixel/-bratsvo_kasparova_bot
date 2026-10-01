@@ -3085,8 +3085,8 @@ async def finish_schedule(chat_id, user_id, context):
     if award:
         await add_xp(user_id, state.get("first_name", ""), state.get("username", ""),
                      XP_SCHEDULE_BONUS, coins_amount=COINS_SCHEDULE, context=context)
-        mark_schedule_filled(user_id)
         xp_line = f"  +{XP_SCHEDULE_BONUS} XP  •  🪙 +{COINS_SCHEDULE}"
+    mark_schedule_filled(user_id)          # ВСЕГДА помечаем расписание заполненным
     await safe_send(context, chat_id,
                     f"✅ *Расписание сохранено!*{xp_line}\n"
                     f"━━━━━━━━━━━━━\n"
@@ -3346,6 +3346,9 @@ async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         user = update.effective_user
 
+    # Инвалидируем кэш клиента — расписание могло только что обновиться
+    _invalidate_client_row(user.id)
+
     day_num = get_training_day_number(user.id)
     if day_num is None:
         sched = get_schedule_days(user_id=user.id)
@@ -3357,10 +3360,13 @@ async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         else:
             await safe_reply(update,
-                "📅 Сегодня не тренировочный день по твоему расписанию.\n\n"
-                f"Твои дни: *{', '.join(sched)}*")
+                "😌 Сегодня не тренировочный день по твоему расписанию.\n\n"
+                f"📅 Твои дни: *{', '.join(sched)}*\n\n"
+                "_Отдыхай, набирайся сил!_ 💪")
             return
 
+    # Инвалидируем кэш планов — тренер мог только что загрузить
+    _ws_invalidate("training_plans")
     cycle = get_current_cycle()
     if cycle == 0:
         await safe_reply(update,
@@ -3374,24 +3380,56 @@ async def show_plan_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Возможно, тренер ещё не загрузил этот день.")
         return
 
+    # Красиво оформляем план: добавляем пробелы между блоками
+    formatted_plan = _format_plan_text(plan)
+
     await safe_reply(update,
-        f"📋 *ПЛАН ТРЕНИРОВКИ — День {day_num}*\n"
-        f"_Цикл {cycle}_\n"
+        f"📋 *ПЛАН ТРЕНИРОВКИ*\n"
+        f"День {day_num} из 3  •  Цикл {cycle}\n"
         f"━━━━━━━━━━━━━\n\n"
-        f"{plan}\n\n"
+        f"{formatted_plan}\n\n"
         f"━━━━━━━━━━━━━\n"
-        "💡 _Запиши рабочие веса в каждом подходе и отправь отчёт._\n"
+        "💡 _Запиши рабочие веса и отправь отчёт._\n"
         "👇 *Нажми «📝 Отчёт за сегодня»*",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📝 Отчёт за сегодня", callback_data="wk_today")],
         ]))
 
 
+def _format_plan_text(raw: str) -> str:
+    """Форматирует план тренировки: добавляет пробелы между блоками,
+    выделяет заголовки, делает текст удобным для чтения."""
+    if not raw:
+        return raw
+    lines = raw.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append("")
+            continue
+        # Если строка — заголовок блока (заглавные / начинается с эмодзи / номером)
+        up = stripped.upper()
+        if (stripped == up and len(stripped) > 3 and stripped.isalpha()) or \
+           stripped.startswith(("🔥", "💪", "🏋", "📌", "⚡", "🎯", "1.", "2.", "3.", "4.", "5.",
+                                "РАЗМИНКА", "РАЗВИВАЮЩАЯ", "ГИПЕРТРОФИЯ", "ЗАМИНКА", "БЛОК")):
+            if result and result[-1] != "":
+                result.append("")  # Пустая строка перед блоком
+            result.append(f"*{md_safe(stripped)}*")
+        else:
+            result.append(stripped)
+    return "\n".join(result)
+
+
 # ── ТРЕНЕР: ЗАГРУЗКА ПЛАНА ───────────────────────────────────────────────────
 
 async def upload_plan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тренер начинает пошаговую загрузку тренировочного плана."""
-    user = update.effective_user
+    if update.callback_query:
+        await update.callback_query.answer()
+        user = update.callback_query.from_user
+    else:
+        user = update.effective_user
     if user.id != TRAINER_ID:
         return
     cycle = get_current_cycle() + 1
@@ -3401,7 +3439,8 @@ async def upload_plan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "plans": {},
     }
     save_states()
-    await safe_reply(update,
+    chat_id = update.effective_chat.id
+    await safe_send(context, chat_id,
         f"📋 *ЗАГРУЗКА ПЛАНА — Цикл {cycle}*\n"
         f"━━━━━━━━━━━━━\n\n"
         f"Отправь план для *Дня 1*.\n\n"
@@ -3473,16 +3512,16 @@ async def handle_plan_upload_text(update: Update, context: ContextTypes.DEFAULT_
     preview = ""
     for d in (1, 2, 3):
         p = plans.get(d, "—")
-        short = p[:100] + "..." if len(p) > 100 else p
-        preview += f"\n*День {d}:*\n{md_safe(short)}\n"
+        short = p[:150] + "..." if len(p) > 150 else p
+        preview += f"\n📌 *День {d}:*\n{md_safe(short)}\n"
 
     await safe_reply(update,
         f"✅ *ПЛАН ЗАГРУЖЕН — Цикл {cycle}*\n"
         f"━━━━━━━━━━━━━\n"
         f"{preview}\n"
         f"━━━━━━━━━━━━━\n"
-        "Ученики увидят план в меню тренировок\n"
-        "по кнопке «📋 Получить план».",
+        "👥 Ученики увидят план в *«Тренировки»*\n"
+        "по кнопке *«📋 Получить план»*",
         reply_markup=menu_for(user.id))
     return True
 
